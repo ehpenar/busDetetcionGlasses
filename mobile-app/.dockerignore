@@ -1,0 +1,82 @@
+# 🚫 .dockerignore - Archivos que NO se copian al contenedor Docker
+# Esto optimiza la imagen y reduce el tamaño
+
+# 📁 Directorios de Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 📝 Explicación: node_modules se instala dentro del contenedor
+# Los logs de npm/yarn no son necesarios en producción
+
+# 📁 Archivos de desarrollo
+.git/
+.gitignore
+README.md
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# 📝 Explicación: .git contiene el historial de versiones (no necesario en producción)
+# Los archivos .env pueden contener secretos (se definen en docker-compose.yml)
+
+# 📁 Archivos de sistema
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# 📝 Explicación: Archivos temporales y de sistema operativo
+# .DS_Store (macOS), Thumbs.db (Windows), archivos de editor
+
+# 📁 Archivos de IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# 📝 Explicación: Configuraciones de editores de código
+# Cada desarrollador puede tener su propia configuración
+
+# 📁 Archivos de testing
+coverage/
+.nyc_output/
+*.lcov
+
+# 📝 Explicación: Reportes de cobertura de tests
+# No necesarios en la imagen de producción
+
+# 📁 Archivos de build
+dist/
+build/
+.expo/
+.expo-shared/
+
+# 📝 Explicación: Archivos compilados y caché de Expo
+# Se regeneran dentro del contenedor
+
+# 📁 Archivos de Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# 📝 Explicación: Los archivos de Docker no necesitan estar dentro del contenedor
+# Evita recursión infinita
+
+# 📁 Archivos de documentación
+docs/
+*.md
+LICENSE
+
+# 📝 Explicación: Documentación no es necesaria en la imagen de producción
+# Se puede acceder desde el repositorio
+
+# 📁 Archivos de scripts
+scripts/
+*.sh
+
+# 📝 Explicación: Scripts de desarrollo no son necesarios en producción
+# Se ejecutan en el host, no en el contenedor
