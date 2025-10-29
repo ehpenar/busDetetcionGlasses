@@ -29,7 +29,8 @@
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO"
-      ]
+      ],
+      "package": "com.ehpenar.busdetectionmobile"
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -41,6 +42,11 @@
           "cameraPermission": "Allow $(PRODUCT_NAME) to access your camera for object detection"
         }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "41485a82-3d06-4131-a691-2fff01f6460e"
+      }
+    }
   }
 }
