@@ -10,12 +10,36 @@ class BusDetectionService {
     this.model = null;
     this.isModelLoaded = false;
     this.inputSize = 640; // Common YOLOv8 input
-    this.targetClasses = ['car', 'bus', 'truck'];
-    this.classIdByName = { car: 2, bus: 5, truck: 7 };
-    this.colors = { car: '#45B7D1', bus: '#2ecc71', truck: '#e67e22' };
-    this.scoreThreshold = 0.25;
-    this.iouThreshold = 0.45;
-    this.maxDetections = 20;
+    // COCO classes we will report
+    this.targetClasses = [
+      'person', 'bicycle', 'car', 'motorcycle', 'bus', 'truck',
+      'traffic light', 'stop sign'
+    ];
+    // COCO indices as used by YOLOv8
+    this.classIdByName = {
+      person: 0,
+      bicycle: 1,
+      car: 2,
+      motorcycle: 3,
+      bus: 5,
+      truck: 7,
+      'traffic light': 9,
+      'stop sign': 11,
+    };
+    this.colors = {
+      person: '#e74c3c',
+      bicycle: '#2980b9',
+      car: '#45B7D1',
+      motorcycle: '#8e44ad',
+      bus: '#2ecc71',
+      truck: '#e67e22',
+      'traffic light': '#f1c40f',
+      'stop sign': '#c0392b',
+    };
+    this.scoreThreshold = 0.6; // raise to reduce FP
+    this.iouThreshold = 0.50;  // stricter NMS
+    this.maxDetections = 10;   // limit number of boxes
+    this.minBoxNormArea = 0.01; // filter tiny boxes (normalized area)
   }
 
   async ensureBackendReady() {
@@ -146,10 +170,8 @@ class BusDetectionService {
         }
       }
       const combinedScore = bestScore * objectness;
-      if (
-        combinedScore >= this.scoreThreshold &&
-        (bestIdx === this.classIdByName.car || bestIdx === this.classIdByName.bus || bestIdx === this.classIdByName.truck)
-      ) {
+      const allowed = Object.values(this.classIdByName);
+      if (combinedScore >= this.scoreThreshold && allowed.includes(bestIdx)) {
         // Convert from center xywh to xyxy. If values appear in pixels, normalize by input size.
         let x1 = cx - w / 2;
         let y1 = cy - h / 2;
@@ -159,9 +181,13 @@ class BusDetectionService {
         if (pixelLike) {
           x1 /= this.inputSize; y1 /= this.inputSize; x2 /= this.inputSize; y2 /= this.inputSize;
         }
-        boxes.push([x1, y1, x2, y2]);
-        scores.push(combinedScore);
-        classes.push(bestIdx);
+        // filter very small boxes
+        const area = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+        if (area >= this.minBoxNormArea) {
+          boxes.push([x1, y1, x2, y2]);
+          scores.push(combinedScore);
+          classes.push(bestIdx);
+        }
       }
     }
 
@@ -193,7 +219,7 @@ class BusDetectionService {
       const [x, y, w, h] = boxesTensor.arraySync()[idx];
       const score = scoresTensor.arraySync()[idx];
       const clsId = classes[idx];
-      const clsName = clsId === this.classIdByName.car ? 'car' : clsId === this.classIdByName.bus ? 'bus' : 'truck';
+      const clsName = Object.keys(this.classIdByName).find(k => this.classIdByName[k] === clsId) || 'object';
       // Convert back to normalized xywh
       const bboxNorm = {
         x: x / this.inputSize,

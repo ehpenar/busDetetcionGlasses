@@ -273,7 +273,7 @@ export default function App() {
                     ]}
                   >
                     <Text style={[styles.detectionLabel, { color: detection.color || '#45B7D1' }]}>
-                      Carro {Math.round(detection.confidence * 100)}%
+                      {detection.class} {Math.round(detection.confidence * 100)}%
                     </Text>
                   </View>
                 ))}
