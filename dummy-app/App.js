@@ -6,6 +6,8 @@ import * as ImagePicker from 'expo-image-picker';
 import BusDetectionService from './services/BusDetectionService';
 
 const { width, height } = Dimensions.get('window');
+const displayWidth = width * 0.8;
+const displayHeight = width * 0.6;
 
 export default function App() {
   const [permission, requestPermission] = useCameraPermissions();
@@ -42,27 +44,31 @@ export default function App() {
 
   const detectBuses = async (imageUri) => {
     if (!modelLoaded) {
-      Alert.alert('Modelo no cargado', 'El modelo de detección aún no está listo. Intenta de nuevo en unos segundos.');
+      Alert.alert('Modelo YOLOv8 no cargado', 'El modelo de detección aún no está listo. Intenta de nuevo en unos segundos.');
       return;
     }
 
     setIsDetecting(true);
     try {
-      console.log('🚌 Starting bus detection...');
+      console.log('🚗 Starting YOLOv8 car detection...');
       const results = await BusDetectionService.detectBuses(imageUri);
       setDetections(results);
       
       if (results.length > 0) {
         Alert.alert(
-          '¡Buses detectados!', 
-          `Se encontraron ${results.length} bus(es) en la imagen.`
+          '¡Detecciones YOLOv8!', 
+          `Se encontraron ${results.length} vehículo(s) en la imagen.`
         );
       } else {
-        Alert.alert('Sin buses', 'No se detectaron buses en la imagen.');
+        Alert.alert('Sin detecciones', 'YOLOv8 no detectó vehículos en la imagen. Intenta con otra imagen.');
       }
     } catch (error) {
-      console.error('Error detecting buses:', error);
-      Alert.alert('Error', 'No se pudo procesar la imagen para detectar buses.');
+      console.error('Error detecting buses with YOLOv8:', error);
+      Alert.alert(
+        'Error de detección YOLOv8', 
+        `No se pudo procesar la imagen: ${error.message}`
+      );
+      setDetections([]); // Clear any previous detections
     } finally {
       setIsDetecting(false);
     }
@@ -100,11 +106,13 @@ export default function App() {
       try {
         const photo = await cameraRef.current.takePictureAsync({
           quality: 0.8,
-          base64: false,
+          base64: true,
+          skipProcessing: true,
         });
         setCapturedImage(photo.uri);
         setShowCamera(false);
-        Alert.alert('¡Foto tomada!', 'La imagen se ha capturado exitosamente. Usa el botón "Detectar Buses" para analizarla.');
+        // Detección automática cuando se toma foto con cámara
+        await detectBuses({ uri: photo.uri, base64: photo.base64 });
       } catch (error) {
         Alert.alert('Error', 'No se pudo tomar la foto');
       }
@@ -123,11 +131,14 @@ export default function App() {
       allowsEditing: true,
       aspect: [4, 3],
       quality: 0.8,
+      base64: true,
     });
 
     if (!result.canceled) {
-      setCapturedImage(result.assets[0].uri);
-      Alert.alert('¡Imagen seleccionada!', 'La imagen se ha seleccionado exitosamente. Usa el botón "Detectar Buses" para analizarla.');
+      const asset = result.assets[0];
+      setCapturedImage(asset.uri);
+      // Detección automática cuando se selecciona imagen de galería
+      await detectBuses({ uri: asset.uri, base64: asset.base64 });
     }
   };
 
@@ -161,6 +172,13 @@ export default function App() {
   if (showCamera) {
     return (
       <View style={styles.cameraContainer}>
+        {/* Botón de Atrás en la parte superior */}
+        <View style={styles.topControls}>
+          <TouchableOpacity style={styles.backButton} onPress={() => setShowCamera(false)}>
+            <Text style={styles.backButtonText}>← Atrás</Text>
+          </TouchableOpacity>
+        </View>
+
         <CameraView
           style={styles.camera}
           facing={cameraType}
@@ -178,10 +196,10 @@ export default function App() {
                   style={[
                     styles.detectionBox,
                     {
-                      left: detection.bbox.x,
-                      top: detection.bbox.y,
-                      width: detection.bbox.width,
-                      height: detection.bbox.height,
+                      left: detection.bbox ? detection.bbox.x : (detection.bboxNorm?.x || 0) * displayWidth,
+                      top: detection.bbox ? detection.bbox.y : (detection.bboxNorm?.y || 0) * displayHeight,
+                      width: detection.bbox ? detection.bbox.width : (detection.bboxNorm?.width || 0) * displayWidth,
+                      height: detection.bbox ? detection.bbox.height : (detection.bboxNorm?.height || 0) * displayHeight,
                     }
                   ]}
                 >
@@ -195,21 +213,18 @@ export default function App() {
 
           <View style={styles.cameraControls}>
             <TouchableOpacity style={styles.cameraButton} onPress={toggleCameraType}>
-              <Text style={styles.buttonText}>Cambiar Cámara</Text>
+              <Text style={styles.buttonText}>🔄 Cambiar</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.captureButton} onPress={takePicture}>
-              <Text style={styles.buttonText}>Tomar Foto</Text>
+              <Text style={styles.captureButtonText}>📷</Text>
             </TouchableOpacity>
             <TouchableOpacity 
               style={[styles.cameraButton, realtimeDetection && styles.activeButton]} 
               onPress={toggleRealtimeDetection}
             >
               <Text style={styles.buttonText}>
-                {realtimeDetection ? '⏹️ Parar Detección' : '🔍 Detectar en Vivo'}
+                {realtimeDetection ? '⏹️ Parar' : '🔍 Vivo'}
               </Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.cameraButton} onPress={() => setShowCamera(false)}>
-              <Text style={styles.buttonText}>Cancelar</Text>
             </TouchableOpacity>
           </View>
         </CameraView>
@@ -219,34 +234,62 @@ export default function App() {
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>🚌 Detector de Buses</Text>
+      <Text style={styles.title}>🚗 Detector de Carros</Text>
       
       {/* Model Status */}
       <View style={styles.statusContainer}>
         <Text style={styles.statusText}>
-          Modelo: {modelLoaded ? '✅ Cargado' : '⏳ Cargando...'}
+          YOLOv8: {modelLoaded ? '✅ Modelo Real Cargado' : '⏳ Cargando modelo...'}
         </Text>
         {isDetecting && (
           <View style={styles.detectingContainer}>
             <ActivityIndicator size="small" color="#3498db" />
-            <Text style={styles.detectingText}>Detectando buses...</Text>
+            <Text style={styles.detectingText}>YOLOv8 detectando carros...</Text>
           </View>
         )}
       </View>
       
       {capturedImage && (
         <View style={styles.imageContainer}>
-          <Image source={{ uri: capturedImage }} style={styles.capturedImage} />
+          <View style={styles.imageWrapper}>
+            <Image source={{ uri: capturedImage }} style={styles.capturedImage} />
+            
+            {/* Visual Detection Overlay */}
+            {detections.length > 0 && (
+              <View style={styles.detectionOverlay}>
+                {detections.map((detection, index) => (
+                  <View
+                    key={index}
+                    style={[
+                      styles.detectionBox,
+                      {
+                        left: detection.bbox ? detection.bbox.x : (detection.bboxNorm?.x || 0) * displayWidth,
+                        top: detection.bbox ? detection.bbox.y : (detection.bboxNorm?.y || 0) * displayHeight,
+                        width: detection.bbox ? detection.bbox.width : (detection.bboxNorm?.width || 0) * displayWidth,
+                        height: detection.bbox ? detection.bbox.height : (detection.bboxNorm?.height || 0) * displayHeight,
+                        borderColor: detection.color || '#45B7D1',
+                        backgroundColor: `${detection.color || '#45B7D1'}20`,
+                      }
+                    ]}
+                  >
+                    <Text style={[styles.detectionLabel, { color: detection.color || '#45B7D1' }]}>
+                      Carro {Math.round(detection.confidence * 100)}%
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            )}
+          </View>
           
-          {/* Detection Results */}
+          {/* Detection Results Text */}
           {detections.length > 0 && (
             <View style={styles.detectionResults}>
               <Text style={styles.detectionTitle}>
-                🚌 Buses detectados: {detections.length}
+                🚗 Detecciones: {detections.length}
               </Text>
               {detections.map((detection, index) => (
-                <Text key={index} style={styles.detectionItem}>
-                  Bus {index + 1}: {Math.round(detection.confidence * 100)}% confianza
+                <Text key={index} style={[styles.detectionItem, { color: detection.color || '#45B7D1' }]}>
+                  {detection.class} {index + 1}: {Math.round(detection.confidence * 100)}% confianza
                 </Text>
               ))}
             </View>
@@ -266,28 +309,24 @@ export default function App() {
 
       <View style={styles.buttonContainer}>
         <TouchableOpacity style={styles.primaryButton} onPress={() => setShowCamera(true)}>
-          <Text style={styles.buttonText}>📷 Abrir Cámara</Text>
+          <Text style={styles.buttonText}>📷 Tomar Foto (YOLOv8)</Text>
         </TouchableOpacity>
         
         <TouchableOpacity style={styles.secondaryButton} onPress={pickImageFromGallery}>
-          <Text style={styles.buttonText}>🖼️ Seleccionar de Galería</Text>
+          <Text style={styles.buttonText}>🖼️ Seleccionar de Galería (YOLOv8)</Text>
         </TouchableOpacity>
         
-        <TouchableOpacity 
-          style={[styles.detectButton, (!modelLoaded || isDetecting) && styles.disabledButton]} 
-          onPress={() => {
-            if (capturedImage) {
-              detectBuses(capturedImage);
-            } else {
-              Alert.alert('Sin imagen', 'Primero selecciona una imagen de la galería o toma una foto.');
-            }
-          }}
-          disabled={!modelLoaded || isDetecting}
-        >
-          <Text style={styles.buttonText}>
-            {isDetecting ? '🔍 Detectando...' : '🚌 Detectar Buses'}
-          </Text>
-        </TouchableOpacity>
+        {capturedImage && (
+          <TouchableOpacity 
+            style={[styles.detectButton, (!modelLoaded || isDetecting) && styles.disabledButton]} 
+            onPress={() => detectBuses(capturedImage)}
+            disabled={!modelLoaded || isDetecting}
+          >
+            <Text style={styles.buttonText}>
+              {isDetecting ? '🔍 YOLOv8 detectando...' : '🔄 Re-detectar Carros'}
+            </Text>
+          </TouchableOpacity>
+        )}
       </View>
 
       <StatusBar style="auto" />
@@ -322,6 +361,25 @@ const styles = StyleSheet.create({
   camera: {
     flex: 1,
   },
+  topControls: {
+    position: 'absolute',
+    top: 50,
+    left: 20,
+    right: 20,
+    zIndex: 10,
+  },
+  backButton: {
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 25,
+    alignSelf: 'flex-start',
+  },
+  backButtonText: {
+    color: 'white',
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
   cameraControls: {
     position: 'absolute',
     bottom: 50,
@@ -342,6 +400,11 @@ const styles = StyleSheet.create({
     borderRadius: 50,
     borderWidth: 3,
     borderColor: 'white',
+  },
+  captureButtonText: {
+    color: 'white',
+    fontSize: 24,
+    fontWeight: 'bold',
   },
   buttonContainer: {
     width: '100%',
@@ -391,11 +454,16 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginVertical: 20,
   },
-  capturedImage: {
+  imageWrapper: {
+    position: 'relative',
     width: width * 0.8,
     height: width * 0.6,
-    borderRadius: 10,
     marginBottom: 15,
+  },
+  capturedImage: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 10,
   },
   detectionResults: {
     backgroundColor: 'rgba(0, 0, 0, 0.7)',
@@ -456,20 +524,20 @@ const styles = StyleSheet.create({
   },
   detectionBox: {
     position: 'absolute',
-    borderWidth: 2,
-    borderColor: '#2ecc71',
-    backgroundColor: 'rgba(46, 204, 113, 0.2)',
+    borderWidth: 3,
+    borderRadius: 5,
   },
   detectionLabel: {
     position: 'absolute',
-    top: -25,
+    top: -30,
     left: 0,
-    color: '#2ecc71',
     fontSize: 12,
     fontWeight: 'bold',
-    backgroundColor: 'rgba(0, 0, 0, 0.7)',
-    padding: 2,
-    borderRadius: 3,
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: 4,
+    borderWidth: 1,
   },
   activeButton: {
     backgroundColor: '#2ecc71',

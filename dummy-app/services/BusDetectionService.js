@@ -1,108 +1,248 @@
-// Simplified Bus Detection Service
-// Note: This is a mock implementation for demonstration
-// In production, you would integrate with a real ML model
+// Real YOLOv8 inference via TensorFlow.js (React Native)
+import 'react-native-get-random-values';
+import * as tf from '@tensorflow/tfjs';
+import '@tensorflow/tfjs-react-native';
+import { bundleResourceIO, decodeJpeg } from '@tensorflow/tfjs-react-native';
+import * as FileSystem from 'expo-file-system';
 
 class BusDetectionService {
   constructor() {
     this.model = null;
     this.isModelLoaded = false;
-    this.modelPath = './assets/yolov8n_web_model/model.json';
+    this.inputSize = 640; // Common YOLOv8 input
+    this.targetClasses = ['car', 'bus', 'truck'];
+    this.classIdByName = { car: 2, bus: 5, truck: 7 };
+    this.colors = { car: '#45B7D1', bus: '#2ecc71', truck: '#e67e22' };
+    this.scoreThreshold = 0.25;
+    this.iouThreshold = 0.45;
+    this.maxDetections = 20;
+  }
+
+  async ensureBackendReady() {
+    if (!tf.getBackend || !tf.engine().backendName) {
+      await tf.ready();
+    } else if (!tf.engine().backendName) {
+      await tf.ready();
+    }
+    // Prefer RN WebGL when available
+    try {
+      if (tf.getBackend() !== 'rn-webgl') {
+        await tf.setBackend('rn-webgl');
+        await tf.ready();
+      }
+    } catch (_) {
+      // Fallback to CPU if needed
+      await tf.setBackend('cpu');
+      await tf.ready();
+    }
   }
 
   async loadModel() {
     try {
-      console.log('🔍 Loading bus detection model...');
-      // Simulate model loading
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      console.log('🔍 Initializing TensorFlow backend...');
+      await this.ensureBackendReady();
+
+      if (this.model) {
+        this.isModelLoaded = true;
+        return true;
+      }
+
+      console.log('🔍 Loading YOLOv8 TFJS model from bundled assets...');
+      const modelJson = require('../assets/yolov8n_web_model/model.json');
+      const weights = [
+        require('../assets/yolov8n_web_model/group1-shard1of4.bin'),
+        require('../assets/yolov8n_web_model/group1-shard2of4.bin'),
+        require('../assets/yolov8n_web_model/group1-shard3of4.bin'),
+        require('../assets/yolov8n_web_model/group1-shard4of4.bin'),
+      ];
+
+      this.model = await tf.loadGraphModel(bundleResourceIO(modelJson, weights));
       this.isModelLoaded = true;
-      console.log('✅ Bus detection model loaded successfully!');
+      console.log('✅ YOLOv8 model loaded!');
       return true;
     } catch (error) {
-      console.error('❌ Error loading model:', error);
-      return false;
+      console.error('❌ Error loading YOLOv8 model:', error);
+      this.isModelLoaded = false;
+      throw new Error('Failed to load YOLOv8 model');
     }
   }
 
-  async detectBuses(imageUri) {
-    if (!this.isModelLoaded) {
-      console.log('⚠️ Model not loaded, loading now...');
-      const loaded = await this.loadModel();
-      if (!loaded) {
-        throw new Error('Failed to load model');
+  async imageToTensor({ uri, base64 }) {
+    // Prefer base64 if provided (more reliable on Android gallery URIs)
+    let imgB64 = base64;
+    if (!imgB64) {
+      // Fallback: read file as base64 when we have a file:// URI
+      if (!uri) {
+        throw new Error('No image data provided');
       }
-    }
-
-    try {
-      console.log('🚌 Starting bus detection...');
-      
-      // Simulate processing time
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      
-      // Mock detection results (simulate finding buses)
-      const mockDetections = this.generateMockDetections();
-      
-      console.log(`✅ Detection completed! Found ${mockDetections.length} objects`);
-      return mockDetections;
-      
-    } catch (error) {
-      console.error('❌ Error during detection:', error);
-      throw error;
-    }
-  }
-
-  generateMockDetections() {
-    // Generate realistic mock detections for demonstration
-    const detections = [];
-    
-    // Simulate finding 0-3 buses with random confidence
-    const numBuses = Math.floor(Math.random() * 4); // 0-3 buses
-    
-    for (let i = 0; i < numBuses; i++) {
-      detections.push({
-        class: 'bus',
-        confidence: 0.6 + Math.random() * 0.3, // 60-90% confidence
-        bbox: {
-          x: Math.random() * 200,
-          y: Math.random() * 150,
-          width: 100 + Math.random() * 100,
-          height: 60 + Math.random() * 60
-        }
+      if (uri.startsWith('content://')) {
+        throw new Error('Content URI not supported, please provide base64');
+      }
+      imgB64 = await FileSystem.readAsStringAsync(uri, {
+        encoding: FileSystem.EncodingType.Base64,
       });
     }
-    
-    return detections;
+
+    const imgBuffer = tf.util.encodeString(imgB64, 'base64').buffer;
+    const raw = new Uint8Array(imgBuffer);
+    // Decode JPEG -> Tensor3D [H,W,3]
+    const decoded = tf.tidy(() => decodeJpeg(raw, 3));
+    const [h, w] = decoded.shape;
+    // Resize and normalize
+    const resized = tf.image.resizeBilinear(decoded, [this.inputSize, this.inputSize]);
+    const normalized = tf.div(resized, 255.0).expandDims(0); // [1,640,640,3]
+    decoded.dispose();
+    resized.dispose();
+    return { input: normalized, originalSize: { width: w, height: h } };
   }
 
-  // Method to detect buses in real-time from camera
-  async detectBusesRealtime(imageData) {
-    if (!this.isModelLoaded) {
-      const loaded = await this.loadModel();
-      if (!loaded) {
-        throw new Error('Failed to load model');
+  // Postprocess YOLOv8 head output to boxes and scores
+  postprocess(outputTensor) {
+    // Handle common YOLOv8 TFJS layouts
+    let data = outputTensor;
+    const shape = data.shape; // e.g. [1,N,85] or [1,84,8400] or [1,8400,84]
+
+    // Convert to [N,85] where 0:4 = cx,cy,w,h and 4:84 = class scores
+    if (shape.length === 3) {
+      if (shape[1] === 84) {
+        // [1,84,8400] → transpose to [8400,84]
+        data = data.squeeze(0).transpose([1, 0]);
+      } else if (shape[2] === 84) {
+        // [1,8400,84] → squeeze to [8400,84]
+        data = data.squeeze(0);
+      } else {
+        // [1,N,85] → squeeze to [N,85]
+        data = data.squeeze(0);
+      }
+    } else {
+      data = data.squeeze();
+    }
+
+    // If we have [N,84], prepend object coords assumed at first 4, class scores next 80
+    // Some exports might already be sigmoid-ed; apply sigmoid defensively then clamp
+    let dataArray = data.arraySync();
+    const rows = dataArray.length;
+    const boxes = [];
+    const scores = [];
+    const classes = [];
+    for (let i = 0; i < rows; i++) {
+      const row = dataArray[i];
+      const has85 = row.length >= 85; // 4 + 1 obj + 80 classes
+      const len = row.length;
+      const cx = row[0];
+      const cy = row[1];
+      const w = row[2];
+      const h = row[3];
+      const classSlice = has85 ? row.slice(5, len) : row.slice(4, len);
+      const objectness = has85 ? (1 / (1 + Math.exp(-row[4]))) : 1.0;
+      // Sigmoid
+      const classScores = classSlice.map(v => 1 / (1 + Math.exp(-v)));
+      let bestIdx = 0;
+      let bestScore = classScores[0] || 0;
+      for (let j = 1; j < classScores.length; j++) {
+        if (classScores[j] > bestScore) {
+          bestScore = classScores[j];
+          bestIdx = j;
+        }
+      }
+      const combinedScore = bestScore * objectness;
+      if (
+        combinedScore >= this.scoreThreshold &&
+        (bestIdx === this.classIdByName.car || bestIdx === this.classIdByName.bus || bestIdx === this.classIdByName.truck)
+      ) {
+        // Convert from center xywh to xyxy. If values appear in pixels, normalize by input size.
+        let x1 = cx - w / 2;
+        let y1 = cy - h / 2;
+        let x2 = cx + w / 2;
+        let y2 = cy + h / 2;
+        const pixelLike = Math.max(Math.abs(x1), Math.abs(y1), Math.abs(x2), Math.abs(y2)) > 1;
+        if (pixelLike) {
+          x1 /= this.inputSize; y1 /= this.inputSize; x2 /= this.inputSize; y2 /= this.inputSize;
+        }
+        boxes.push([x1, y1, x2, y2]);
+        scores.push(combinedScore);
+        classes.push(bestIdx);
       }
     }
 
-    try {
-      // Simulate real-time processing
-      await new Promise(resolve => setTimeout(resolve, 500));
-      
-      // Generate mock detections for real-time
-      const detections = this.generateMockDetections();
-      
-      return detections;
-      
-    } catch (error) {
-      console.error('❌ Error during real-time detection:', error);
-      throw error;
+    if (boxes.length === 0) {
+      return [];
     }
+
+    // NMS on normalized boxes (convert to pixel grid of input size)
+    const boxesTensor = tf.tensor2d(
+      boxes.map(([x1, y1, x2, y2]) => [
+        x1 * this.inputSize,
+        y1 * this.inputSize,
+        (x2 - x1) * this.inputSize,
+        (y2 - y1) * this.inputSize,
+      ])
+    ); // [N,4] as [x, y, w, h]
+    const scoresTensor = tf.tensor1d(scores);
+
+    const selectedIdx = tf.image.nonMaxSuppression(
+      boxesTensor,
+      scoresTensor,
+      this.maxDetections,
+      this.iouThreshold,
+      this.scoreThreshold
+    ).arraySync();
+
+    const results = [];
+    for (const idx of selectedIdx) {
+      const [x, y, w, h] = boxesTensor.arraySync()[idx];
+      const score = scoresTensor.arraySync()[idx];
+      const clsId = classes[idx];
+      const clsName = clsId === this.classIdByName.car ? 'car' : clsId === this.classIdByName.bus ? 'bus' : 'truck';
+      // Convert back to normalized xywh
+      const bboxNorm = {
+        x: x / this.inputSize,
+        y: y / this.inputSize,
+        width: w / this.inputSize,
+        height: h / this.inputSize,
+      };
+      results.push({
+        class: clsName,
+        confidence: score,
+        color: this.colors[clsName] || '#45B7D1',
+        bboxNorm,
+      });
+    }
+
+    boxesTensor.dispose();
+    scoresTensor.dispose();
+    return results;
   }
 
-  // Clean up resources
-  dispose() {
-    if (this.model) {
-      this.model.dispose();
-      this.model = null;
-      this.isModelLoaded = false;
+  async detectBuses(image) {
+    if (!this.isModelLoaded) {
+      await this.loadModel();
+    }
+
+    try {
+      console.log('🚗 Running YOLOv8 inference...');
+      const { input } = await this.imageToTensor(
+        typeof image === 'string' ? { uri: image } : image
+      );
+      const outputs = await this.model.executeAsync(input);
+
+      // Handle single or multi output graphs
+      const outTensor = Array.isArray(outputs) ? outputs[0] : outputs;
+      const detections = this.postprocess(outTensor);
+
+      // Cleanup
+      input.dispose();
+      if (Array.isArray(outputs)) {
+        outputs.forEach(t => t.dispose());
+      } else {
+        outTensor.dispose();
+      }
+
+      console.log(`✅ Inference done. Detections: ${detections.length}`);
+      return detections;
+    } catch (error) {
+      console.error('❌ Error during YOLOv8 inference:', error);
+      throw new Error(`YOLOv8 inference failed: ${error.message}`);
     }
   }
 }

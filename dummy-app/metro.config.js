@@ -26,3 +26,17 @@ config.server = {
 };
 
 module.exports = config;
+
+// Extensiones de assets necesarias para cargar modelos TFJS
+config.resolver.assetExts = config.resolver.assetExts
+  .filter(ext => ext !== 'json')
+  .concat([
+  'bin',
+  'json',
+  'yaml',
+]);
+
+// Asegurar que las extensiones de código permanecen intactas
+config.resolver.sourceExts = (config.resolver.sourceExts || ['js', 'jsx', 'ts', 'tsx'])
+  .filter(ext => ext !== 'json');
+
