@@ -3,6 +3,9 @@ import { StatusBar } from 'expo-status-bar';
 import { StyleSheet, Text, View, TouchableOpacity, Image, Alert, Dimensions, ActivityIndicator } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
+import { Video, ResizeMode } from 'expo-av';
+import * as VideoThumbnails from 'expo-video-thumbnails';
+import * as FileSystem from 'expo-file-system/legacy';
 import BusDetectionService from './services/BusDetectionService';
 
 const { width, height } = Dimensions.get('window');
@@ -20,6 +23,15 @@ export default function App() {
   const [realtimeDetection, setRealtimeDetection] = useState(false);
   const [realtimeDetections, setRealtimeDetections] = useState([]);
   const cameraRef = useRef(null);
+  const [selectedVideo, setSelectedVideo] = useState(null);
+  const [videoDetections, setVideoDetections] = useState([]);
+  const [isProcessingVideo, setIsProcessingVideo] = useState(false);
+  const [videoProcessingProgress, setVideoProcessingProgress] = useState(0);
+  const videoRef = useRef(null);
+  const frameProcessingInterval = useRef(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [detectionsByTime, setDetectionsByTime] = useState({}); // { timestamp: [detections] }
+  const [currentVideoTime, setCurrentVideoTime] = useState(0);
 
   // Load the YOLO model when component mounts
   useEffect(() => {
@@ -102,43 +114,282 @@ export default function App() {
   };
 
   const takePicture = async () => {
-    if (cameraRef.current) {
-      try {
-        const photo = await cameraRef.current.takePictureAsync({
-          quality: 0.8,
-          base64: true,
-          skipProcessing: true,
-        });
-        setCapturedImage(photo.uri);
-        setShowCamera(false);
-        // Detección automática cuando se toma foto con cámara
-        await detectBuses({ uri: photo.uri, base64: photo.base64 });
-      } catch (error) {
-        Alert.alert('Error', 'No se pudo tomar la foto');
+    if (!cameraRef.current) return;
+    try {
+      const photo = await cameraRef.current.takePictureAsync({
+        quality: 0.8,
+        base64: true,
+        skipProcessing: true,
+      });
+      setCapturedImage(photo.uri);
+      setDetections([]);
+      setShowCamera(false);
+      // Solo hacer detección si el modelo está cargado
+      if (modelLoaded && photo.base64) {
+        setIsDetecting(true);
+        try {
+          const results = await BusDetectionService.detectBuses({ uri: photo.uri, base64: photo.base64 });
+          setDetections(results);
+          if (results.length > 0) {
+            Alert.alert('¡Detecciones YOLOv8!', `Se encontraron ${results.length} vehículo(s) en la imagen.`);
+          } else {
+            Alert.alert('Sin detecciones', 'YOLOv8 no detectó vehículos en la imagen.');
+          }
+        } catch (error) {
+          console.error('Error detecting:', error);
+          Alert.alert('Error', 'No se pudo procesar la imagen.');
+        } finally {
+          setIsDetecting(false);
+        }
       }
+    } catch (error) {
+      console.error('Error taking picture:', error);
+      Alert.alert('Error', 'No se pudo tomar la foto');
     }
   };
 
   const pickImageFromGallery = async () => {
-    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert('Permisos necesarios', 'Se necesitan permisos para acceder a la galería');
+    try {
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permisos necesarios', 'Se necesitan permisos para acceder a la galería');
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: false,
+        quality: 0.8,
+        base64: true,
+      });
+
+      if (!result.canceled && result.assets && result.assets[0]) {
+        const asset = result.assets[0];
+        setCapturedImage(asset.uri);
+        setDetections([]);
+        // Solo hacer detección si el modelo está cargado
+        if (modelLoaded && asset.base64) {
+          setIsDetecting(true);
+          try {
+            const results = await BusDetectionService.detectBuses({ uri: asset.uri, base64: asset.base64 });
+            setDetections(results);
+            if (results.length > 0) {
+              Alert.alert('¡Detecciones YOLOv8!', `Se encontraron ${results.length} vehículo(s) en la imagen.`);
+            } else {
+              Alert.alert('Sin detecciones', 'YOLOv8 no detectó vehículos en la imagen.');
+            }
+          } catch (error) {
+            console.error('Error detecting:', error);
+            Alert.alert('Error', 'No se pudo procesar la imagen.');
+          } finally {
+            setIsDetecting(false);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error selecting image:', error);
+      Alert.alert('Error', 'No se pudo seleccionar la imagen. Por favor intenta de nuevo.');
+    }
+  };
+
+  const pickVideoFromGallery = async () => {
+    try {
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permisos necesarios', 'Se necesitan permisos para acceder a la galería');
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Videos,
+        allowsEditing: false,
+        quality: 1.0,
+      });
+
+      if (!result.canceled && result.assets && result.assets[0]) {
+        const asset = result.assets[0];
+        setSelectedVideo(asset.uri);
+        setVideoDetections([]);
+        setVideoProcessingProgress(0);
+      }
+    } catch (error) {
+      console.error('Error selecting video:', error);
+      Alert.alert('Error', 'No se pudo seleccionar el video. Por favor intenta de nuevo.');
+    }
+  };
+
+  const handleVideoPlaybackStatusUpdate = async (status) => {
+    // Track video playback status and update current time for detection overlays
+    if (status.isLoaded) {
+      const currentTime = status.positionMillis || 0;
+      setCurrentVideoTime(currentTime);
+      // Redondear al segundo más cercano para buscar detecciones
+      const timeKey = Math.round(currentTime / 1000) * 1000;
+      // Las detecciones ya están en detectionsByTime y se mostrarán en el overlay
+    }
+  };
+
+  const stopVideoProcessing = () => {
+    setIsProcessingVideo(false);
+    setVideoProcessingProgress(0);
+  };
+
+  const processVideoFrame = async (videoUri, timeMs) => {
+    if (!modelLoaded) return [];
+
+    try {
+      // Extract frame at specific time
+      const { uri } = await VideoThumbnails.getThumbnailAsync(videoUri, {
+        time: timeMs,
+        quality: 0.8,
+      });
+      
+      // Read frame as base64
+      const base64 = await FileSystem.readAsStringAsync(uri, {
+        encoding: 'base64',
+      });
+      
+      // Run detection on frame
+      const detections = await BusDetectionService.detectBuses({ uri, base64 });
+      return detections;
+    } catch (error) {
+      console.error('Error processing video frame:', error);
+      return [];
+    }
+  };
+
+  const processVideoFrames = async () => {
+    if (!selectedVideo || !modelLoaded || isProcessingVideo) {
+      Alert.alert('Info', 'Por favor selecciona un video y espera a que el modelo se cargue');
       return;
     }
 
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: true,
-      aspect: [4, 3],
-      quality: 0.8,
-      base64: true,
-    });
+    setIsProcessingVideo(true);
+    setVideoDetections([]);
+    setVideoProcessingProgress(0);
 
-    if (!result.canceled) {
-      const asset = result.assets[0];
-      setCapturedImage(asset.uri);
-      // Detección automática cuando se selecciona imagen de galería
-      await detectBuses({ uri: asset.uri, base64: asset.base64 });
+    try {
+      // Get video status to determine duration
+      let videoDuration = 10000; // Default 10 seconds
+      if (videoRef.current) {
+        try {
+          const status = await videoRef.current.getStatusAsync();
+          if (status.isLoaded && status.durationMillis) {
+            videoDuration = status.durationMillis;
+          }
+        } catch (e) {
+          console.log('Could not get video duration, using default');
+        }
+      }
+
+      Alert.alert(
+        'Procesamiento de Video',
+        `El video se procesará frame por frame. Duración aproximada: ${Math.round(videoDuration / 1000)}s. Esto puede tomar varios minutos.`,
+        [{ text: 'Continuar', onPress: async () => {
+          try {
+            // Process every 0.5 seconds for smoother playback
+            const frameInterval = 500; // ms
+            const detectionsMap = {};
+            let currentTime = 0;
+            
+            while (currentTime < videoDuration) {
+              const detections = await processVideoFrame(selectedVideo, currentTime);
+              
+              // Guardar detecciones por timestamp (redondeado al segundo más cercano)
+              const timeKey = Math.round(currentTime / 1000) * 1000;
+              if (detections.length > 0) {
+                detectionsMap[timeKey] = detections;
+              }
+              
+              currentTime += frameInterval;
+              const progress = Math.min(100, (currentTime / videoDuration) * 100);
+              setVideoProcessingProgress(progress);
+              
+              // Actualizar mapa de detecciones periódicamente
+              if (currentTime % 2000 < frameInterval) {
+                setDetectionsByTime({ ...detectionsMap });
+              }
+            }
+            
+            // Guardar todas las detecciones por timestamp
+            setDetectionsByTime(detectionsMap);
+            
+            // Calcular total de detecciones únicas para resumen
+            const allUniqueDetections = [];
+            Object.values(detectionsMap).forEach(frameDetections => {
+              frameDetections.forEach(det => {
+                const existing = allUniqueDetections.find(d => 
+                  d.class === det.class && 
+                  Math.abs((d.bboxNorm?.x || 0) - (det.bboxNorm?.x || 0)) < 0.15
+                );
+                if (!existing || det.confidence > existing.confidence) {
+                  if (existing) {
+                    const index = allUniqueDetections.indexOf(existing);
+                    allUniqueDetections[index] = det;
+                  } else {
+                    allUniqueDetections.push(det);
+                  }
+                }
+              });
+            });
+            
+            setVideoDetections(allUniqueDetections);
+            setVideoProcessingProgress(100);
+            
+            // Guardar resultados en archivo JSON
+            try {
+              const resultsData = {
+                videoUri: selectedVideo,
+                processedAt: new Date().toISOString(),
+                duration: videoDuration,
+                totalUniqueDetections: allUniqueDetections.length,
+                detectionsByTimestamp: Object.keys(detectionsMap).map(timestamp => ({
+                  timestamp: parseInt(timestamp),
+                  detections: detectionsMap[timestamp].map(det => ({
+                    class: det.class,
+                    confidence: det.confidence,
+                    bboxNorm: det.bboxNorm,
+                  })),
+                })),
+                summary: allUniqueDetections.map(det => ({
+                  class: det.class,
+                  confidence: det.confidence,
+                  bboxNorm: det.bboxNorm,
+                })),
+              };
+              
+              const resultsJson = JSON.stringify(resultsData, null, 2);
+              const fileName = `video_detections_${Date.now()}.json`;
+              const fileUri = `${FileSystem.documentDirectory}${fileName}`;
+              
+              // Guardar archivo JSON con los resultados
+              await FileSystem.writeAsStringAsync(fileUri, resultsJson);
+              
+              Alert.alert(
+                'Procesamiento Completo',
+                `Se encontraron ${allDetections.length} detecciones únicas en el video.\n\nResultados guardados en: ${fileName}`
+              );
+              
+              console.log('✅ Results saved to:', fileUri);
+            } catch (saveError) {
+              console.error('Error saving results:', saveError);
+              Alert.alert(
+                'Procesamiento Completo',
+                `Se encontraron ${allDetections.length} detecciones únicas en el video.\n\n⚠️ No se pudieron guardar los resultados.`
+              );
+            }
+          } catch (error) {
+            console.error('Error processing video:', error);
+            Alert.alert('Error', `No se pudo procesar el video completo: ${error.message}`);
+          } finally {
+            setIsProcessingVideo(false);
+          }
+        }}, { text: 'Cancelar' }]
+      );
+    } catch (error) {
+      console.error('Error starting video processing:', error);
+      Alert.alert('Error', 'No se pudo iniciar el procesamiento del video');
+      setIsProcessingVideo(false);
     }
   };
 
@@ -307,13 +558,130 @@ export default function App() {
         </View>
       )}
 
+      {selectedVideo && (
+        <View style={styles.videoContainer}>
+          <View style={styles.videoWrapper}>
+            <Video
+              ref={videoRef}
+              source={{ uri: selectedVideo }}
+              style={styles.video}
+              resizeMode={ResizeMode.CONTAIN}
+              shouldPlay={false}
+              useNativeControls
+              onPlaybackStatusUpdate={handleVideoPlaybackStatusUpdate}
+            />
+            
+            {/* Overlay con detecciones sobre el video */}
+            {Object.keys(detectionsByTime).length > 0 && (
+              <View style={styles.videoOverlay}>
+                {(() => {
+                  // Obtener detecciones para el tiempo actual (redondeado al segundo)
+                  const timeKey = Math.round(currentVideoTime / 1000) * 1000;
+                  const currentDetections = detectionsByTime[timeKey] || [];
+                  const videoWidth = width * 0.9;
+                  const videoHeight = width * 0.5;
+                  
+                  return currentDetections.map((detection, index) => {
+                    const bbox = detection.bboxNorm || {};
+                    const left = (bbox.x || 0) * videoWidth;
+                    const top = (bbox.y || 0) * videoHeight;
+                    const boxWidth = (bbox.width || 0) * videoWidth;
+                    const boxHeight = (bbox.height || 0) * videoHeight;
+                    
+                    return (
+                      <View
+                        key={index}
+                        style={[
+                          styles.videoDetectionBox,
+                          {
+                            left,
+                            top,
+                            width: boxWidth,
+                            height: boxHeight,
+                            borderColor: detection.color || '#45B7D1',
+                            backgroundColor: `${detection.color || '#45B7D1'}20`,
+                          }
+                        ]}
+                      >
+                        <Text style={[styles.videoDetectionLabel, { color: detection.color || '#45B7D1' }]}>
+                          {detection.class} {Math.round(detection.confidence * 100)}%
+                        </Text>
+                      </View>
+                    );
+                  });
+                })()}
+              </View>
+            )}
+          </View>
+          
+          {videoDetections.length > 0 && (
+            <View style={styles.detectionResults}>
+              <Text style={styles.detectionTitle}>
+                🎬 Detecciones en Video: {videoDetections.length}
+              </Text>
+              {videoDetections.map((detection, index) => (
+                <Text key={index} style={[styles.detectionItem, { color: detection.color || '#45B7D1' }]}>
+                  {detection.class}: {Math.round(detection.confidence * 100)}% confianza
+                </Text>
+              ))}
+            </View>
+          )}
+
+          {isProcessingVideo && (
+            <View style={styles.processingContainer}>
+              <ActivityIndicator size="small" color="#3498db" />
+              <Text style={styles.processingText}>
+                Procesando video: {Math.round(videoProcessingProgress)}%
+              </Text>
+            </View>
+          )}
+
+          <TouchableOpacity 
+            style={[styles.detectButton, (!modelLoaded || isProcessingVideo) && styles.disabledButton]} 
+            onPress={processVideoFrames}
+            disabled={!modelLoaded || isProcessingVideo}
+          >
+            <Text style={styles.buttonText}>
+              {isProcessingVideo ? '🎬 Procesando video...' : '🔍 Procesar Video (YOLOv8)'}
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity 
+            style={styles.clearButton} 
+            onPress={() => {
+              setSelectedVideo(null);
+              setVideoDetections([]);
+              setVideoProcessingProgress(0);
+              setDetectionsByTime({});
+              setCurrentVideoTime(0);
+              stopVideoProcessing();
+            }}
+          >
+            <Text style={styles.buttonText}>🗑️ Eliminar Video</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       <View style={styles.buttonContainer}>
-        <TouchableOpacity style={styles.primaryButton} onPress={() => setShowCamera(true)}>
+        <TouchableOpacity 
+          style={styles.primaryButton}
+          onPress={() => setShowCamera(true)}
+        >
           <Text style={styles.buttonText}>📷 Tomar Foto (YOLOv8)</Text>
         </TouchableOpacity>
         
-        <TouchableOpacity style={styles.secondaryButton} onPress={pickImageFromGallery}>
+        <TouchableOpacity 
+          style={styles.secondaryButton}
+          onPress={pickImageFromGallery}
+        >
           <Text style={styles.buttonText}>🖼️ Seleccionar de Galería (YOLOv8)</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity 
+          style={styles.videoButton}
+          onPress={pickVideoFromGallery}
+        >
+          <Text style={styles.buttonText}>🎬 Seleccionar Video (YOLOv8)</Text>
         </TouchableOpacity>
         
         {capturedImage && (
@@ -428,8 +796,10 @@ const styles = StyleSheet.create({
   },
   buttonText: {
     color: 'white',
-    fontSize: 16,
+    fontSize: 18,
     fontWeight: 'bold',
+    textAlign: 'center',
+    includeFontPadding: false,
   },
   statusContainer: {
     alignItems: 'center',
@@ -491,17 +861,31 @@ const styles = StyleSheet.create({
   },
   detectButton: {
     backgroundColor: '#2ecc71',
-    padding: 10,
-    borderRadius: 8,
-    flex: 0.45,
+    padding: 18,
+    borderRadius: 12,
+    marginVertical: 10,
+    width: '90%',
     alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
   },
   clearButton: {
     backgroundColor: '#e74c3c',
-    padding: 10,
-    borderRadius: 8,
-    flex: 0.45,
+    padding: 18,
+    borderRadius: 12,
+    marginVertical: 10,
+    width: '90%',
     alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
   },
   detectionOverlay: {
     position: 'absolute',
@@ -545,5 +929,73 @@ const styles = StyleSheet.create({
   disabledButton: {
     backgroundColor: '#95a5a6',
     opacity: 0.6,
+  },
+  videoContainer: {
+    alignItems: 'center',
+    marginVertical: 20,
+    width: '100%',
+  },
+  video: {
+    width: width * 0.9,
+    height: width * 0.5,
+    borderRadius: 10,
+    marginBottom: 15,
+  },
+  videoButton: {
+    backgroundColor: '#e67e22',
+    padding: 15,
+    borderRadius: 10,
+    marginVertical: 10,
+    width: '80%',
+    alignItems: 'center',
+  },
+  processingContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginVertical: 10,
+    backgroundColor: 'rgba(52, 152, 219, 0.2)',
+    padding: 10,
+    borderRadius: 8,
+    width: width * 0.8,
+  },
+  processingText: {
+    color: '#3498db',
+    fontSize: 14,
+    marginLeft: 10,
+    fontWeight: 'bold',
+  },
+  videoWrapper: {
+    position: 'relative',
+    width: width * 0.9,
+    height: width * 0.5,
+    marginBottom: 15,
+  },
+  videoOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 10,
+    pointerEvents: 'none', // Permite que los controles del video funcionen
+  },
+  videoDetectionBox: {
+    position: 'absolute',
+    borderWidth: 3,
+    borderRadius: 5,
+    justifyContent: 'flex-start',
+    alignItems: 'flex-start',
+  },
+  videoDetectionLabel: {
+    position: 'absolute',
+    top: -25,
+    left: 0,
+    fontSize: 12,
+    fontWeight: 'bold',
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: 4,
+    borderWidth: 1,
   },
 });

@@ -3,7 +3,7 @@ import 'react-native-get-random-values';
 import * as tf from '@tensorflow/tfjs';
 import '@tensorflow/tfjs-react-native';
 import { bundleResourceIO, decodeJpeg } from '@tensorflow/tfjs-react-native';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 
 class BusDetectionService {
   constructor() {
@@ -103,7 +103,7 @@ class BusDetectionService {
         throw new Error('Content URI not supported, please provide base64');
       }
       imgB64 = await FileSystem.readAsStringAsync(uri, {
-        encoding: FileSystem.EncodingType.Base64,
+        encoding: 'base64',
       });
     }
 
